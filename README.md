@@ -6,7 +6,8 @@ VisionGuard is a real-time computer vision system that detects and tracks object
 - Tracking + events (OpenCV window)
 - Analytics dashboard (Streamlit)
 
-> Add your demo video here (assets/demo.mp4) and screenshots in assets/
+ assets/demo.mp4
+ assets/data.png
 
 ## Tech Stack
 Python, OpenCV, Ultralytics YOLOv8, ByteTrack, Streamlit, Pandas
