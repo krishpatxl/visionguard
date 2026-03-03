@@ -11,6 +11,37 @@ from src.zones import Zone
 Point = Tuple[float, float]
 
 
+@dataclass(frozen=True)
+class Tripwire:
+    """Line segment + proximity threshold for crossing detection."""
+    name: str
+    a: Point
+    b: Point
+    proximity_px: float = 40.0
+
+    def side(self, p: Point) -> float:
+        (ax, ay), (bx, by) = self.a, self.b
+        (px, py) = p
+        return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+    def point_to_segment_distance(self, p: Point) -> float:
+        (ax, ay), (bx, by) = self.a, self.b
+        (px, py) = p
+
+        abx, aby = bx - ax, by - ay
+        apx, apy = px - ax, py - ay
+        ab2 = abx * abx + aby * aby
+
+        if ab2 == 0:
+            return math.hypot(px - ax, py - ay)
+
+        t = (apx * abx + apy * aby) / ab2
+        t = max(0.0, min(1.0, t))
+
+        cx, cy = ax + t * abx, ay + t * aby
+        return math.hypot(px - cx, py - cy)
+
+
 @dataclass
 class TrackState:
     """Small per-track state: recent centers + zone timing + event cooldowns."""
@@ -19,22 +50,26 @@ class TrackState:
     zone_enter_ts: Optional[float] = None
     last_event_ts: Dict[str, float] = None
 
+    # per-tripwire name -> last side value
+    last_tripwire_side: Dict[str, float] = None
+
 
 class BehaviorAnalyzer:
     """
-    Turns tracked centers into simple behavior events.
-    Nothing fancy, but it’s fast and explainable.
+    Motion + zone + tripwire event generator.
+    Designed to stay readable rather than "too clever".
     """
 
     def __init__(
         self,
         zones: List[Zone],
         history_seconds: float = 3.0,
-        loiter_seconds: float = 3.0,
-        speed_spike_threshold: float = 120.0,  # px/sec; tune to your cam
-        erratic_turns_threshold: int = 6,
-        erratic_window_seconds: float = 3.0,
+        loiter_seconds: float = 6.0,
+        speed_spike_threshold: float = 900.0,
+        erratic_turns_threshold: int = 4,
+        erratic_window_seconds: float = 2.5,
         event_cooldown_seconds: float = 2.0,
+        tripwires: Optional[List[Tripwire]] = None,
     ):
         self.zones = zones
         self.history_seconds = history_seconds
@@ -43,9 +78,10 @@ class BehaviorAnalyzer:
         self.erratic_turns_threshold = erratic_turns_threshold
         self.erratic_window_seconds = erratic_window_seconds
         self.event_cooldown_seconds = event_cooldown_seconds
+        self.tripwires = tripwires or []
 
         self.tracks: Dict[int, TrackState] = defaultdict(
-            lambda: TrackState(history=deque(), last_event_ts={})
+            lambda: TrackState(history=deque(), last_event_ts={}, last_tripwire_side={})
         )
 
     def update(self, track_id: int, center: Point, now: Optional[float] = None) -> None:
@@ -67,8 +103,8 @@ class BehaviorAnalyzer:
     def _speed_px_s(self, st: TrackState) -> Optional[float]:
         if len(st.history) < 2:
             return None
-        t0, (x0, y0) = st.history[0]
-        t1, (x1, y1) = st.history[-1]
+        (t0, (x0, y0)) = st.history[0]
+        (t1, (x1, y1)) = st.history[-1]
         dt = t1 - t0
         if dt <= 0:
             return None
@@ -93,7 +129,7 @@ class BehaviorAnalyzer:
             if prev_angle is not None:
                 diff = abs(angle - prev_angle)
                 diff = min(diff, 2 * math.pi - diff)
-                if diff > 0.7:  # ~40 degrees
+                if diff > 1.0:  # ~57 degrees
                     turns += 1
             prev_angle = angle
 
@@ -130,13 +166,11 @@ class BehaviorAnalyzer:
         # loitering
         if zone and st.zone_enter_ts and (now - st.zone_enter_ts) >= self.loiter_seconds:
             if self._allow_event(st, "loitering", now):
-                events.append(
-                    ("loitering", {
-                        "track_id": track_id,
-                        "zone": zone,
-                        "seconds_in_zone": round(now - st.zone_enter_ts, 2),
-                    })
-                )
+                events.append(("loitering", {
+                    "track_id": track_id,
+                    "zone": zone,
+                    "seconds_in_zone": round(now - st.zone_enter_ts, 2),
+                }))
 
         # speed spike
         spd = self._speed_px_s(st)
@@ -149,5 +183,31 @@ class BehaviorAnalyzer:
         if turns >= self.erratic_turns_threshold:
             if self._allow_event(st, "erratic_motion", now):
                 events.append(("erratic_motion", {"track_id": track_id, "turns": turns}))
+
+        # tripwire crossings
+        for tw in self.tripwires:
+            prev_side = st.last_tripwire_side.get(tw.name)
+            cur_side = tw.side(center)
+
+            if prev_side is None:
+                st.last_tripwire_side[tw.name] = cur_side
+                continue
+
+            dist = tw.point_to_segment_distance(center)
+            if dist > tw.proximity_px:
+                st.last_tripwire_side[tw.name] = cur_side
+                continue
+
+            crossed = (cur_side == 0) or (prev_side == 0) or ((cur_side > 0) != (prev_side > 0))
+            if crossed and self._allow_event(st, f"tripwire_cross:{tw.name}", now):
+                direction = "A_to_B" if prev_side < 0 and cur_side > 0 else "B_to_A"
+                events.append(("tripwire_cross", {
+                    "track_id": track_id,
+                    "tripwire": tw.name,
+                    "direction": direction,
+                    "distance_px": round(dist, 2),
+                }))
+
+            st.last_tripwire_side[tw.name] = cur_side
 
         return events

@@ -1,0 +1,45 @@
+app:
+  output_dir: outputs
+  events_file: events.jsonl
+  heatmap_file: heatmap.png
+
+video:
+  # 0 = default webcam
+  default_source: 0
+  show_window: true
+
+model:
+  weights: yolov8n.pt
+  conf: 0.35
+  imgsz: 640
+
+tracking:
+  max_age: 30
+
+analytics:
+  # Loitering: seconds inside zone before event triggers
+  loiter_seconds: 6.0
+
+  # Speed spike threshold (pixels/sec)
+  speed_spike_px_s: 900.0
+
+  # "Erratic" = number of sharp turns within last N seconds
+  erratic_window_s: 2.5
+  erratic_turns_threshold: 4
+
+zones:
+  # normalized coords (0..1) relative to frame
+  loiter_zone:
+    enabled: true
+    x1: 0.05
+    y1: 0.10
+    x2: 0.45
+    y2: 0.55
+
+tripwire:
+  enabled: true
+  # normalized line endpoints (0..1)
+  p1: [0.55, 0.10]
+  p2: [0.55, 0.95]
+  # how close (pixels) a centroid must be to the line segment to count as a crossing
+  proximity_px: 40
